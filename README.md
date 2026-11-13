@@ -7,7 +7,7 @@ The front camera is analysed **on the phone** (Google MediaPipe Face Landmarker)
 ## Install (no Android Studio needed)
 
 1. On your phone open the latest release: **<https://github.com/wolverinenhm/EySnatch/releases/latest>**
-2. Download `EySnatch-v….apk` and open it (allow "install unknown apps" for your browser/files app when asked).
+2. Download `EySnatch-v….apk` and open it (allow "install unknown apps" for your browser/files app when asked). If Play Protect says the app is unknown, that is because it is a personal build that is not on the Play Store: choose **More details → Install anyway**.
 3. Open **EySnatch** and follow the checklist on the home screen:
    - **Allow camera** (and notifications).
    - **Turn on the accessibility service** – this is what lets EySnatch press Back/Home and swipe for you.

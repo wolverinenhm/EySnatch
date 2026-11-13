@@ -7,7 +7,7 @@ import android.widget.Button
 import android.widget.TextView
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
-import androidx.test.rules.GrantPermissionRule
+import androidx.test.rule.GrantPermissionRule
 import com.eysnatch.core.CalStep
 import com.eysnatch.core.Frame
 import org.junit.Assert.assertEquals
