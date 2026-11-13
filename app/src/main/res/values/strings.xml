@@ -1,4 +1,4 @@
 <resources>
     <string name="app_name">EySnatch</string>
-    <string name="service_description">Lets EySnatch perform back, home, screenshot, swipe and scroll actions triggered by your eye and head movements.</string>
+    <string name="service_description">Lets EySnatch press Back, Home, Recents, take screenshots and swipe or scroll the screen when it sees your eye movements. It never reads or stores what is on your screen, and camera images never leave your phone.</string>
 </resources>
