@@ -44,7 +44,7 @@ class PipelineTest {
 
     @After
     fun tearDown() {
-        landmarker.close()
+        if (::landmarker.isInitialized) landmarker.close()
     }
 
     private fun frameOf(asset: String): Frame {

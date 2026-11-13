@@ -15,11 +15,7 @@ adb install -r dist/EySnatch-androidTest.apk || fail "test apk install failed"
 adb shell pm grant $PKG android.permission.CAMERA
 adb shell pm grant $PKG android.permission.POST_NOTIFICATIONS
 
-echo "=== switch the accessibility service on"
-adb shell settings put secure enabled_accessibility_services $PKG/$PKG.EySnatchAccessibilityService
-adb shell settings put secure accessibility_enabled 1
-
-echo "=== instrumented tests"
+echo "=== instrumented tests (they switch the accessibility service on themselves)"
 adb logcat -c
 adb shell am instrument -w $PKG.test/androidx.test.runner.AndroidJUnitRunner | tee "$OUT/instrumentation.txt"
 adb logcat -d > "$OUT/instrumentation-logcat.txt"
@@ -46,9 +42,9 @@ grep -q "FATAL EXCEPTION" "$OUT/logcat-full.txt" && fail "the app crashed"
 
 echo "=== screenshots of every screen"
 n=2
-for a in LiveActivity SettingsActivity CalibrateActivity; do
-  adb shell am start -n $PKG/.$a
-  sleep 4
+for a in live settings calibrate; do
+  adb shell am start -n $PKG/.MainActivity --es open $a
+  sleep 5
   adb exec-out screencap -p > "$OUT/0$n-$a.png"
   n=$((n + 1))
 done

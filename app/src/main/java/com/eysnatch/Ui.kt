@@ -1,8 +1,10 @@
 package com.eysnatch
 
 import android.content.Context
+import android.content.res.ColorStateList
 import android.graphics.Color
 import android.graphics.drawable.GradientDrawable
+import android.util.TypedValue
 import android.view.View
 import android.view.ViewGroup
 import android.widget.Button
@@ -20,6 +22,12 @@ fun <T : View> LinearLayout.add(v: T, top: Int = 0, height: Int = ViewGroup.Layo
     return v
 }
 
+private fun themeColor(ctx: Context, attr: Int): ColorStateList? {
+    val tv = TypedValue()
+    if (!ctx.theme.resolveAttribute(attr, tv, true)) return null
+    return if (tv.resourceId != 0) ctx.getColorStateList(tv.resourceId) else ColorStateList.valueOf(tv.data)
+}
+
 /** Plain programmatic UI helpers; the app has few screens and no layout XML to keep in sync. */
 object Ui {
     fun column(ctx: Context): LinearLayout = LinearLayout(ctx).apply {
@@ -35,6 +43,7 @@ object Ui {
     fun text(ctx: Context, s: String, sp: Float = 15f, bold: Boolean = false): TextView = TextView(ctx).apply {
         text = s
         textSize = sp
+        themeColor(ctx, android.R.attr.textColorPrimary)?.let { setTextColor(it) }
         if (bold) setTypeface(typeface, android.graphics.Typeface.BOLD)
     }
 
@@ -46,7 +55,7 @@ object Ui {
     }
 
     fun dim(v: TextView): TextView {
-        v.alpha = 0.72f
+        themeColor(v.context, android.R.attr.textColorSecondary)?.let { v.setTextColor(it) }
         return v
     }
 

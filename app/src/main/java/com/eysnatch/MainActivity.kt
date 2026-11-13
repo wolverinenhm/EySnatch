@@ -126,6 +126,11 @@ class MainActivity : BaseActivity() {
 
     private fun handleIntent(intent: Intent?) {
         if (intent?.getBooleanExtra(EXTRA_AUTOSTART, false) == true && hasCamera() && !Live.running) startTracking()
+        when (intent?.getStringExtra(EXTRA_OPEN)) {
+            "live" -> startActivity(Intent(this, LiveActivity::class.java))
+            "calibrate" -> startActivity(Intent(this, CalibrateActivity::class.java))
+            "settings" -> startActivity(Intent(this, SettingsActivity::class.java))
+        }
     }
 
     private fun check(parent: LinearLayout, buttonLabel: String, onClick: () -> Unit): Check {
@@ -247,5 +252,6 @@ class MainActivity : BaseActivity() {
 
     companion object {
         const val EXTRA_AUTOSTART = "autostart"
+        const val EXTRA_OPEN = "open"
     }
 }

@@ -27,6 +27,11 @@ android {
     }
 
     buildTypes {
+        // MediaPipe has no x86_64 library, so the debug build also carries 32-bit x86: that lets the
+        // CI emulator (x86_64 image, runs 32-bit apps) exercise the real face model. Phones are ARM.
+        debug {
+            ndk { abiFilters += listOf("x86", "arm64-v8a", "armeabi-v7a") }
+        }
         release {
             isMinifyEnabled = false
             signingConfig = signingConfigs.getByName("debug")
