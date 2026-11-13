@@ -43,7 +43,7 @@ grep -q "FATAL EXCEPTION" "$OUT/logcat-full.txt" && fail "the app crashed"
 echo "=== screenshots of every screen"
 n=2
 for a in live settings calibrate; do
-  adb shell am start -n $PKG/.MainActivity --es open $a
+  adb shell am start -n $PKG/.MainActivity -f 0x04000000 --es open $a
   sleep 5
   adb exec-out screencap -p > "$OUT/0$n-$a.png"
   n=$((n + 1))

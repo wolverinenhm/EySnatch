@@ -1,14 +1,14 @@
 package com.eysnatch
 
 import android.app.Activity
+import android.app.UiAutomation
 import android.os.ParcelFileDescriptor
 import android.util.Log
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
-import androidx.test.uiautomator.UiDevice
 import com.eysnatch.core.PhoneAction
-import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -17,6 +17,11 @@ import org.junit.runner.RunWith
 class ScreensAndActionsTest {
 
     private val instrumentation = InstrumentationRegistry.getInstrumentation()
+
+    // UiAutomation normally switches every other accessibility service off while it is connected.
+    private val automation: UiAutomation by lazy {
+        instrumentation.getUiAutomation(UiAutomation.FLAG_DONT_SUPPRESS_ACCESSIBILITY_SERVICES)
+    }
 
     private fun <T : Activity> opens(type: Class<T>) {
         ActivityScenario.launch(type).use { scenario ->
@@ -35,21 +40,19 @@ class ScreensAndActionsTest {
     @Test
     fun accessibilityServiceCanPressHome() {
         val svc = switchOnAccessibilityService()
-        assertNotNull("the accessibility service did not connect", svc)
-        val device = UiDevice.getInstance(instrumentation)
         ActivityScenario.launch(MainActivity::class.java).use {
             Thread.sleep(1500)
-            svc!!.perform(PhoneAction.HOME, "test")
+            svc.perform(PhoneAction.HOME, "test")
             Thread.sleep(2500)
-            Log.i("EySnatchTest", "ACTIONS TEST RAN, foreground=${device.currentPackageName}")
-            assertNotEquals("Home did not leave the app", "com.eysnatch", device.currentPackageName)
+            val focus = focusedWindow()
+            Log.i("EySnatchTest", "ACTIONS TEST RAN, focus=$focus")
+            assertFalse("Home did not leave the app: $focus", focus.contains("com.eysnatch"))
         }
     }
 
     @Test
     fun accessibilityServiceAcceptsSwipesAndScrolls() {
         val svc = switchOnAccessibilityService()
-        assertNotNull("the accessibility service did not connect", svc)
         ActivityScenario.launch(SettingsActivity::class.java).use {
             Thread.sleep(1500)
             val actions = listOf(
@@ -57,7 +60,7 @@ class ScreensAndActionsTest {
                 PhoneAction.SWIPE_RIGHT, PhoneAction.FORWARD, PhoneAction.BACKWARD,
             )
             for (a in actions) {
-                svc!!.perform(a, "test")
+                svc.perform(a, "test")
                 Thread.sleep(700)
             }
             Log.i("EySnatchTest", "SWIPES TEST RAN")
@@ -65,7 +68,7 @@ class ScreensAndActionsTest {
     }
 
     /** Enables the service the way a user would (secure setting) and waits until Android connects it. */
-    private fun switchOnAccessibilityService(): EySnatchAccessibilityService? {
+    private fun switchOnAccessibilityService(): EySnatchAccessibilityService {
         EySnatchAccessibilityService.instance?.let { return it }
         val me = "${instrumentation.targetContext.packageName}/${EySnatchAccessibilityService::class.java.name}"
         shell("settings put secure enabled_accessibility_services $me")
@@ -74,11 +77,15 @@ class ScreensAndActionsTest {
             EySnatchAccessibilityService.instance?.let { return it }
             Thread.sleep(250)
         }
-        return null
+        Log.w("EySnatchTest", "dumpsys accessibility:\n" + shell("dumpsys accessibility").lines().take(80).joinToString("\n"))
+        throw AssertionError("the accessibility service did not connect within 40 s")
     }
 
-    private fun shell(command: String) {
-        val fd = instrumentation.uiAutomation.executeShellCommand(command)
-        ParcelFileDescriptor.AutoCloseInputStream(fd).use { it.readBytes() }
+    private fun focusedWindow(): String =
+        shell("dumpsys window").lineSequence().firstOrNull { it.contains("mCurrentFocus=") }.orEmpty().trim()
+
+    private fun shell(command: String): String {
+        val fd = automation.executeShellCommand(command)
+        return ParcelFileDescriptor.AutoCloseInputStream(fd).use { it.readBytes().decodeToString() }
     }
 }
