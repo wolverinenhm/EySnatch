@@ -13,6 +13,7 @@ import android.media.AudioManager
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
@@ -107,7 +108,16 @@ class EySnatchAccessibilityService : AccessibilityService() {
         }
     }
 
+    /** A new gesture cancels the one still running, so a swipe that arrives too early is dropped. */
+    private var swipeBusyUntil = 0L
+
     private fun swipe(x1: Float, y1: Float, x2: Float, y2: Float, durationMs: Long) {
+        val now = SystemClock.uptimeMillis()
+        if (now < swipeBusyUntil) {
+            Log.i(TAG, "swipe skipped: the previous one is still running")
+            return
+        }
+        swipeBusyUntil = now + durationMs + 100
         val (w, h) = screenSize()
         val path = Path().apply {
             moveTo(w * x1, h * y1)

@@ -38,27 +38,34 @@ data class CalibrationResult(
 )
 
 /**
- * Learns the user's personal numbers from a few demonstrated poses. It does not assume anything about
- * which way the camera or the face model is oriented: it measures what moved.
+ * Learns the user's personal numbers from a few demonstrated poses. Ranges that were not demonstrated
+ * keep their previous shape (only re-centred on the new resting pose).
  */
 class Calibrator(private val previous: Calibration = Calibration()) {
     private val samples = ArrayList<Frame>()
+    private var total = 0
     private val summaries = LinkedHashMap<CalStep, Summary>()
 
     val sampleCount: Int get() = samples.size
 
-    fun startStep() = samples.clear()
+    fun startStep() {
+        samples.clear()
+        total = 0
+    }
 
+    /** Feed every frame of the capture window, also those without a face (they count against coverage). */
     fun add(f: Frame) {
+        total += 1
         if (f.face) samples.add(f)
     }
 
     fun has(step: CalStep): Boolean = summaries.containsKey(step)
 
-    /** Stores the pose measured since [startStep]; returns false if the face was not seen long enough. */
+    /** Stores the pose measured since [startStep]; false if the face was not seen for most of it. */
     fun finishStep(step: CalStep): Boolean {
-        if (samples.size < MIN_SAMPLES) {
-            samples.clear()
+        val enough = samples.size >= MIN_SAMPLES && samples.size >= MIN_COVERAGE * total
+        if (!enough) {
+            startStep()
             return false
         }
         val usable = samples.drop(samples.size / 4)
@@ -72,7 +79,7 @@ class Calibrator(private val previous: Calibration = Calibration()) {
             pitch = median(usable.map { it.pitch }),
             brow = median(usable.map { it.brow }),
         )
-        samples.clear()
+        startStep()
         return true
     }
 
@@ -84,60 +91,55 @@ class Calibrator(private val previous: Calibration = Calibration()) {
 
         var cal = previous.copy(calibrated = true)
 
-        // ---- Which raw blink channel is the user's left eye? (Learned from the winks.)
+        // ---- Eyes. Both winks must agree before the left/right blink channels are swapped, so one
+        // clumsy wink can never flip them.
         val leftWink = summaries[CalStep.WINK_LEFT]
         val rightWink = summaries[CalStep.WINK_RIGHT]
         val bothClosed = summaries[CalStep.BOTH_CLOSED]
-        if (leftWink != null || rightWink != null || bothClosed != null) {
-            fun vote(s: Summary?, userLeft: Boolean): Int {
-                if (s == null) return 0
-                val a = s.blinkL - neutral.blinkL
-                val b = s.blinkR - neutral.blinkR
-                val diff = if (userLeft) a - b else b - a
-                return when {
-                    diff > WINK_MARGIN -> 1
-                    diff < -WINK_MARGIN -> -1
-                    else -> 0
-                }
-            }
 
-            val vl = vote(leftWink, true)
-            val vr = vote(rightWink, false)
-            val swap = if (vl + vr != 0) vl + vr < 0 else previous.swapEyes
-            if (leftWink != null) {
-                if (vl != 0 && (vl < 0) == swap) rep += "Left wink: recognised"
-                else warn += "Left wink was not clearly recognised. Blinks and eye movements still work; you can map winks to nothing."
-            }
-            if (rightWink != null) {
-                if (vr != 0 && (vr < 0) == swap) rep += "Right wink: recognised"
-                else warn += "Right wink was not clearly recognised. Blinks and eye movements still work; you can map winks to nothing."
-            }
-
-            var closedRawL = bothClosed?.blinkL ?: (neutral.blinkL + DEFAULT_CLOSE_RISE)
-            var closedRawR = bothClosed?.blinkR ?: (neutral.blinkR + DEFAULT_CLOSE_RISE)
-            if (bothClosed != null) {
-                if (closedRawL - neutral.blinkL < MIN_CLOSE_RISE || closedRawR - neutral.blinkR < MIN_CLOSE_RISE) {
-                    warn += "Closed eyes were hard to detect (glare on glasses or dim light?). Try again facing a light."
-                    closedRawL = max(closedRawL, neutral.blinkL + 0.4f)
-                    closedRawR = max(closedRawR, neutral.blinkR + 0.4f)
-                } else {
-                    rep += "Blink: recognised"
-                }
-            }
-            cal = if (swap) {
-                cal.copy(
-                    swapEyes = true,
-                    openL = neutral.blinkR, closedL = closedRawR,
-                    openR = neutral.blinkL, closedR = closedRawL,
-                )
-            } else {
-                cal.copy(
-                    swapEyes = false,
-                    openL = neutral.blinkL, closedL = closedRawL,
-                    openR = neutral.blinkR, closedR = closedRawR,
-                )
+        fun vote(s: Summary?, userLeft: Boolean): Int {
+            if (s == null) return 0
+            val a = s.blinkL - neutral.blinkL
+            val b = s.blinkR - neutral.blinkR
+            val diff = if (userLeft) a - b else b - a
+            return when {
+                diff > WINK_MARGIN -> 1
+                diff < -WINK_MARGIN -> -1
+                else -> 0
             }
         }
+
+        val vl = vote(leftWink, true)
+        val vr = vote(rightWink, false)
+        val swap = if (vl != 0 && vl == vr) vl < 0 else previous.swapEyes
+        if (leftWink != null) {
+            if (vl != 0 && (vl < 0) == swap) rep += "Left wink: recognised"
+            else warn += "Left wink was not clearly recognised. Blinks and eye movements still work; you can map winks to nothing."
+        }
+        if (rightWink != null) {
+            if (vr != 0 && (vr < 0) == swap) rep += "Right wink: recognised"
+            else warn += "Right wink was not clearly recognised. Blinks and eye movements still work; you can map winks to nothing."
+        }
+
+        val openL = if (swap) neutral.blinkR else neutral.blinkL
+        val openR = if (swap) neutral.blinkL else neutral.blinkR
+        var closedL: Float
+        var closedR: Float
+        if (bothClosed != null) {
+            closedL = if (swap) bothClosed.blinkR else bothClosed.blinkL
+            closedR = if (swap) bothClosed.blinkL else bothClosed.blinkR
+            if (closedL - openL < MIN_CLOSE_RISE || closedR - openR < MIN_CLOSE_RISE) {
+                warn += "Closed eyes were hard to detect (glare on glasses or dim light?). Try again facing a light."
+                closedL = max(closedL, openL + 0.4f)
+                closedR = max(closedR, openR + 0.4f)
+            } else {
+                rep += "Blink: recognised"
+            }
+        } else {
+            closedL = max(previous.closedL, openL + 0.4f)
+            closedR = max(previous.closedR, openR + 0.4f)
+        }
+        cal = cal.copy(swapEyes = swap, openL = openL, closedL = closedL, openR = openR, closedR = closedR)
 
         // ---- Direction axes: both extremes are measured, so left/right/up/down signs are learned.
         fun axis(
@@ -150,18 +152,19 @@ class Calibrator(private val previous: Calibration = Calibration()) {
             typical: Axis,
             neutralValue: Float,
         ): Axis {
+            val keep = previousAxis.recentered(neutralValue)
             val p = summaries[posStep]?.let(pick)
             val n = summaries[negStep]?.let(pick)
-            if (p == null && n == null) return previousAxis.copy(base = neutralValue)
+            if (p == null && n == null) return keep
             if (p == null || n == null) {
                 warn += "$name: both directions are needed - kept the previous range."
-                return previousAxis.copy(base = neutralValue)
+                return keep
             }
             val dp = p - neutralValue
             val dn = neutralValue - n
             if (dp * dn <= 0f) {
                 warn += "$name: the two directions looked the same. Redo it with bigger, clearer movements."
-                return previousAxis.copy(base = neutralValue)
+                return keep
             }
             var pos = p
             var neg = n
@@ -186,7 +189,7 @@ class Calibrator(private val previous: Calibration = Calibration()) {
         )
 
         // ---- Eyebrows
-        cal = cal.copy(brow = cal.brow.copy(base = neutral.brow))
+        cal = cal.copy(brow = cal.brow.recentered(neutral.brow))
         summaries[CalStep.BROWS]?.let { b ->
             val rise = b.brow - neutral.brow
             if (rise >= MIN_BROW_RISE) {
@@ -204,6 +207,8 @@ class Calibrator(private val previous: Calibration = Calibration()) {
         return CalibrationResult(cal, rep, warn)
     }
 
+    private fun Axis.recentered(base: Float): Axis = Axis(base, base + posSpan, base - negSpan)
+
     private fun median(v: List<Float>): Float {
         if (v.isEmpty()) return 0f
         val s = v.sorted()
@@ -212,9 +217,9 @@ class Calibrator(private val previous: Calibration = Calibration()) {
 
     companion object {
         const val MIN_SAMPLES = 8
+        const val MIN_COVERAGE = 0.6f
         const val WINK_MARGIN = 0.25f
         const val MIN_CLOSE_RISE = 0.25f
-        const val DEFAULT_CLOSE_RISE = 0.5f
         const val MIN_BROW_RISE = 0.10f
     }
 }

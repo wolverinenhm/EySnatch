@@ -46,7 +46,9 @@ class CalibrateActivity : BaseActivity() {
     private val ticker = object : Runnable {
         override fun run() {
             onTick()
-            handler.postDelayed(this, 50)
+            if (phase == Phase.WAIT_FACE || phase == Phase.READY || phase == Phase.CAPTURE) {
+                handler.postDelayed(this, 50)
+            }
         }
     }
 
@@ -141,7 +143,11 @@ class CalibrateActivity : BaseActivity() {
         primary.visibility = View.GONE
         show(secondary, "Cancel") { abort() }
         if (step == CalStep.NEUTRAL) tertiary.visibility = View.GONE
-        else show(tertiary, "Skip this pose") { index += 1; next() }
+        else show(tertiary, "Skip this pose") {
+            retries = 0
+            index += 1
+            next()
+        }
     }
 
     private fun onTick() {
@@ -211,6 +217,7 @@ class CalibrateActivity : BaseActivity() {
         val result: CalibrationResult = calibrator.build()
         phase = Phase.REVIEW
         handler.removeCallbacks(ticker)
+        endCapture()
         progress.visibility = View.GONE
         title.text = "Calibration finished"
         prompt.text = buildString {
@@ -238,9 +245,14 @@ class CalibrateActivity : BaseActivity() {
     }
 
     private fun cleanup() {
+        handler.removeCallbacksAndMessages(null)
+        endCapture()
+    }
+
+    /** Stops listening to the camera and gives gestures back their normal behaviour. */
+    private fun endCapture() {
         Live.calibrating = false
         Live.frameListener = null
-        handler.removeCallbacksAndMessages(null)
         if (startedService) {
             startedService = false
             stopService(Intent(this, EyeTrackingService::class.java))

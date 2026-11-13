@@ -90,7 +90,7 @@ data class Norm(
 
 /** Converts raw frames to [Norm] and slowly follows the user's resting pose (phone moves, user shifts). */
 class Normalizer(private val cal: Calibration) {
-    private class Tracked(axis: Axis, minSpan: Float) {
+    private class Tracked(axis: Axis, minSpan: Float, private val slowFollow: Boolean = false) {
         var base = axis.base
         private val posSpan = safe(axis.posSpan, minSpan)
         private val negSpan = safe(axis.negSpan, minSpan)
@@ -100,8 +100,15 @@ class Normalizer(private val cal: Calibration) {
             return if (d * posSpan >= 0f) d / posSpan else d / negSpan
         }
 
-        fun follow(x: Float, n: Float, k: Float) {
-            if (abs(n) < 0.3f) base += (x - base) * k
+        /**
+         * Follows the resting pose while the user is near it. Head axes also follow, very slowly, when the
+         * user settles somewhere else (phone moved, leaning back); otherwise a changed resting head pose
+         * would block the eye gestures forever.
+         */
+        fun follow(x: Float, n: Float, fast: Float, slow: Float) {
+            val a = abs(n)
+            if (a < 0.3f) base += (x - base) * fast
+            else if (slowFollow && a < 1.5f) base += (x - base) * slow
         }
 
         private fun safe(span: Float, min: Float): Float =
@@ -110,8 +117,8 @@ class Normalizer(private val cal: Calibration) {
 
     private val gx = Tracked(cal.gazeX, 0.08f)
     private val gy = Tracked(cal.gazeY, 0.08f)
-    private val yaw = Tracked(cal.yaw, 0.03f)
-    private val pitch = Tracked(cal.pitch, 0.03f)
+    private val yaw = Tracked(cal.yaw, 0.03f, slowFollow = true)
+    private val pitch = Tracked(cal.pitch, 0.03f, slowFollow = true)
     private val brow = Tracked(cal.brow, 0.08f)
     private var started = false
     private var lastT = -1L
@@ -137,10 +144,11 @@ class Normalizer(private val cal: Calibration) {
             brow = brow.norm(f.brow),
         )
         if (follow && dt > 0) {
-            val k = 1f - exp(-dt / FOLLOW_MS)
-            gx.follow(f.gazeX, n.gx, k); gy.follow(f.gazeY, n.gy, k)
-            yaw.follow(f.yaw, n.hx, k); pitch.follow(f.pitch, n.hy, k)
-            brow.follow(f.brow, n.brow, k)
+            val fast = 1f - exp(-dt / FOLLOW_MS)
+            val slow = 1f - exp(-dt / SLOW_FOLLOW_MS)
+            gx.follow(f.gazeX, n.gx, fast, slow); gy.follow(f.gazeY, n.gy, fast, slow)
+            yaw.follow(f.yaw, n.hx, fast, slow); pitch.follow(f.pitch, n.hy, fast, slow)
+            brow.follow(f.brow, n.brow, fast, slow)
         }
         return n
     }
@@ -152,6 +160,7 @@ class Normalizer(private val cal: Calibration) {
 
     companion object {
         private const val FOLLOW_MS = 10_000f
+        private const val SLOW_FOLLOW_MS = 25_000f
     }
 }
 

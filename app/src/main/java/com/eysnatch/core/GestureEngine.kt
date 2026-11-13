@@ -8,7 +8,7 @@ data class EngineConfig(
     val sensitivity: Float = 1f,
     /** > 1 needs longer holds, < 1 shorter ones. */
     val holdScale: Float = 1f,
-    /** Gestures that are mapped to an action; the others are ignored. */
+    /** Gestures that are mapped to an action; the others are ignored completely. */
     val enabled: Set<Gesture> = Gesture.values().toSet(),
 )
 
@@ -37,6 +37,9 @@ class GestureEngine(config: EngineConfig = EngineConfig(), calibration: Calibrat
     private var winkSince = -1L
     private var winkSide = 0
     private var winkFired = false
+
+    /** After a real both-eyes closure, one eye reopening must not turn the other still-closed eye into a wink. */
+    private var winkBlocked = false
 
     private class Dwell {
         var since = -1L
@@ -67,25 +70,16 @@ class GestureEngine(config: EngineConfig = EngineConfig(), calibration: Calibrat
             if (lastFaceT >= 0 && t - lastFaceT > FACE_LOST_RESET_MS) resetTransient()
             return emptyList()
         }
+        // A face that comes back after being gone for a while must not inherit half-finished gestures.
+        if (lastFaceT >= 0 && t - lastFaceT > FACE_LOST_RESET_MS) resetTransient()
         lastFaceT = t
 
         val n = normalizer.apply(f, follow = !leftClosed && !rightClosed)
         norm = n
 
-        val raw = ArrayList<GestureEvent>(2)
-        detectEyes(t, n, raw)
-        detectDirections(t, n, raw)
-        if (raw.isEmpty()) return raw
-
-        val out = ArrayList<GestureEvent>(raw.size)
-        for (e in raw) {
-            if (e.gesture !in cfg.enabled) continue
-            if (!e.repeat) {
-                if (t - lastEventT < COOLDOWN_MS) continue
-                lastEventT = t
-            }
-            out += e
-        }
+        val out = ArrayList<GestureEvent>(2)
+        detectEyes(t, n, out)
+        detectDirections(t, n, out)
         return out
     }
 
@@ -97,6 +91,7 @@ class GestureEngine(config: EngineConfig = EngineConfig(), calibration: Calibrat
         winkSince = -1L
         winkSide = 0
         winkFired = false
+        winkBlocked = false
         for (d in dwell.values) {
             d.since = -1L
             d.lastAbove = -1L
@@ -106,6 +101,18 @@ class GestureEngine(config: EngineConfig = EngineConfig(), calibration: Calibrat
     }
 
     private fun scaled(ms: Long): Long = (ms * cfg.holdScale).toLong()
+
+    /**
+     * The only place events are created. A gesture that is switched off never counts, and a gesture that
+     * is ready while another one is cooling down simply waits: the caller keeps its state and retries.
+     */
+    private fun fire(g: Gesture, t: Long, repeat: Boolean, out: MutableList<GestureEvent>): Boolean {
+        if (g !in cfg.enabled) return false
+        if (t - lastEventT < COOLDOWN_MS) return false
+        lastEventT = t
+        out += GestureEvent(g, t, repeat)
+        return true
+    }
 
     private fun detectEyes(t: Long, n: Norm, out: MutableList<GestureEvent>) {
         leftClosed = if (leftClosed) n.closeL > CLOSE_OFF else n.closeL >= CLOSE_ON
@@ -118,8 +125,10 @@ class GestureEngine(config: EngineConfig = EngineConfig(), calibration: Calibrat
             bothSince = -1L
             bothReopened(start, t, out)
         }
+        if (!leftClosed && !rightClosed) winkBlocked = false
 
         val side = when {
+            winkBlocked -> 0
             leftClosed && !rightClosed && n.closeR < WINK_OTHER_MAX -> -1
             rightClosed && !leftClosed && n.closeL < WINK_OTHER_MAX -> 1
             else -> 0
@@ -135,30 +144,31 @@ class GestureEngine(config: EngineConfig = EngineConfig(), calibration: Calibrat
                 winkFired = false
             }
             if (!winkFired && t - winkSince >= scaled(WINK_MS)) {
-                winkFired = true
-                out += GestureEvent(if (side < 0) Gesture.WINK_LEFT else Gesture.WINK_RIGHT, t)
+                val g = if (side < 0) Gesture.WINK_LEFT else Gesture.WINK_RIGHT
+                if (fire(g, t, false, out)) winkFired = true
             }
         }
     }
 
     private fun bothReopened(start: Long, end: Long, out: MutableList<GestureEvent>) {
         val dur = end - start
+        if (dur >= BLINK_MIN_MS) winkBlocked = true
         when {
             dur in BLINK_MIN_MS..BLINK_MAX_MS -> {
                 if (lastBlinkEnd >= 0 && start - lastBlinkEnd <= DOUBLE_GAP_MS) {
                     lastBlinkEnd = -1L
-                    out += GestureEvent(Gesture.DOUBLE_BLINK, end)
+                    fire(Gesture.DOUBLE_BLINK, end, false, out)
                 } else {
                     lastBlinkEnd = end
                 }
             }
             dur >= LONG_MIN_MS && dur < SHUT_MIN_MS -> {
                 lastBlinkEnd = -1L
-                out += GestureEvent(Gesture.LONG_BLINK, end)
+                fire(Gesture.LONG_BLINK, end, false, out)
             }
             dur in SHUT_MIN_MS..SHUT_MAX_MS -> {
                 lastBlinkEnd = -1L
-                out += GestureEvent(Gesture.EYES_SHUT, end)
+                fire(Gesture.EYES_SHUT, end, false, out)
             }
             else -> lastBlinkEnd = -1L
         }
@@ -169,7 +179,7 @@ class GestureEngine(config: EngineConfig = EngineConfig(), calibration: Calibrat
         val headStill = abs(n.hx) < HEAD_STILL && abs(n.hy) < HEAD_STILL
         val trigger = (TRIGGER / cfg.sensitivity).coerceIn(0.3f, 0.95f)
 
-        // Eyes: only the strongest direction counts, and only while both eyes are open and the head is still.
+        // Eyes: only the strongest direction triggers, and only while both eyes are open and the head is still.
         val gl = max(0f, -n.gx)
         val gr = max(0f, n.gx)
         val gu = max(0f, n.gy)
@@ -177,10 +187,10 @@ class GestureEngine(config: EngineConfig = EngineConfig(), calibration: Calibrat
         val gMax = max(max(gl, gr), max(gu, gd))
         val gazeOk = eyesOpen && headStill
         val gDwell = scaled(DWELL_GAZE_MS)
-        step(Gesture.LOOK_LEFT, if (gl == gMax) gl else 0f, gazeOk, t, trigger, gDwell, out)
-        step(Gesture.LOOK_RIGHT, if (gr == gMax) gr else 0f, gazeOk, t, trigger, gDwell, out)
-        step(Gesture.LOOK_UP, if (gu == gMax) gu else 0f, gazeOk, t, trigger, gDwell, out)
-        step(Gesture.LOOK_DOWN, if (gd == gMax) gd else 0f, gazeOk, t, trigger, gDwell, out)
+        step(Gesture.LOOK_LEFT, if (gl == gMax) gl else 0f, gl, gazeOk, t, trigger, gDwell, out)
+        step(Gesture.LOOK_RIGHT, if (gr == gMax) gr else 0f, gr, gazeOk, t, trigger, gDwell, out)
+        step(Gesture.LOOK_UP, if (gu == gMax) gu else 0f, gu, gazeOk, t, trigger, gDwell, out)
+        step(Gesture.LOOK_DOWN, if (gd == gMax) gd else 0f, gd, gazeOk, t, trigger, gDwell, out)
 
         // Head.
         val hl = max(0f, -n.hx)
@@ -189,18 +199,24 @@ class GestureEngine(config: EngineConfig = EngineConfig(), calibration: Calibrat
         val hd = max(0f, -n.hy)
         val hMax = max(max(hl, hr), max(hu, hd))
         val hDwell = scaled(DWELL_HEAD_MS)
-        step(Gesture.TURN_LEFT, if (hl == hMax) hl else 0f, true, t, trigger, hDwell, out)
-        step(Gesture.TURN_RIGHT, if (hr == hMax) hr else 0f, true, t, trigger, hDwell, out)
-        step(Gesture.TILT_UP, if (hu == hMax) hu else 0f, true, t, trigger, hDwell, out)
-        step(Gesture.TILT_DOWN, if (hd == hMax) hd else 0f, true, t, trigger, hDwell, out)
+        step(Gesture.TURN_LEFT, if (hl == hMax) hl else 0f, hl, true, t, trigger, hDwell, out)
+        step(Gesture.TURN_RIGHT, if (hr == hMax) hr else 0f, hr, true, t, trigger, hDwell, out)
+        step(Gesture.TILT_UP, if (hu == hMax) hu else 0f, hu, true, t, trigger, hDwell, out)
+        step(Gesture.TILT_DOWN, if (hd == hMax) hd else 0f, hd, true, t, trigger, hDwell, out)
 
         // Eyebrows: looking up also lifts the brows a little, so a strong upward glance wins.
-        step(Gesture.RAISE_BROWS, n.brow, eyesOpen && gu < 0.5f, t, trigger, scaled(DWELL_BROW_MS), out)
+        step(Gesture.RAISE_BROWS, n.brow, n.brow, eyesOpen && gu < 0.5f, t, trigger, scaled(DWELL_BROW_MS), out)
     }
 
+    /**
+     * [value] is the strength that may trigger (0 when another direction is stronger), [raw] is the real
+     * strength of this direction, used for letting go. [gate] is false while the measurement is unreliable
+     * (eyes closed, head moving): then nothing changes except that the hold timer restarts.
+     */
     private fun step(
         g: Gesture,
-        v: Float,
+        value: Float,
+        raw: Float,
         gate: Boolean,
         t: Long,
         trigger: Float,
@@ -208,28 +224,30 @@ class GestureEngine(config: EngineConfig = EngineConfig(), calibration: Calibrat
         out: MutableList<GestureEvent>,
     ) {
         val d = dwell.getValue(g)
-        if (v < trigger * RELEASE_RATIO) {
-            d.armed = true
+        if (g !in cfg.enabled) {
             d.since = -1L
-            d.nextRepeat = Long.MAX_VALUE
             return
         }
         if (!gate) {
             d.since = -1L
             return
         }
-        if (v >= trigger) {
+        if (raw < trigger * RELEASE_RATIO) {
+            d.armed = true
+            d.since = -1L
+            d.nextRepeat = Long.MAX_VALUE
+            return
+        }
+        if (value >= trigger) {
             if (d.since < 0) d.since = t
             d.lastAbove = t
             if (d.armed) {
-                if (t - d.since >= dwellMs) {
+                if (t - d.since >= dwellMs && fire(g, t, false, out)) {
                     d.armed = false
                     d.nextRepeat = t + REPEAT_DELAY_MS
-                    out += GestureEvent(g, t)
                 }
             } else if (g.directional && t >= d.nextRepeat) {
-                d.nextRepeat = t + REPEAT_INTERVAL_MS
-                out += GestureEvent(g, t, repeat = true)
+                d.nextRepeat = if (fire(g, t, true, out)) t + REPEAT_INTERVAL_MS else t + RETRY_MS
             }
         } else if (d.since >= 0 && t - d.lastAbove > DROPOUT_MS) {
             d.since = -1L
@@ -257,6 +275,7 @@ class GestureEngine(config: EngineConfig = EngineConfig(), calibration: Calibrat
         const val SHUT_MAX_MS = 7000L
         const val REPEAT_DELAY_MS = 1000L
         const val REPEAT_INTERVAL_MS = 700L
+        const val RETRY_MS = 100L
         const val DROPOUT_MS = 160L
         const val COOLDOWN_MS = 450L
         const val FACE_LOST_RESET_MS = 350L

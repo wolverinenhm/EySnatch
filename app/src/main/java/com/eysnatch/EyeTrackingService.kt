@@ -41,10 +41,15 @@ import com.google.mediapipe.tasks.vision.facelandmarker.FaceLandmarker
 import com.google.mediapipe.tasks.vision.facelandmarker.FaceLandmarkerResult
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 
 /**
  * Foreground service that watches the front camera, turns faces into gestures and hands the
  * resulting actions to [EySnatchAccessibilityService].
+ *
+ * Threads: CameraX analyzer thread (frames in) -> MediaPipe result thread (gestures out) -> main thread
+ * (status, notification, running actions). Everything that touches the UI or runs an action goes through
+ * [main] and re-checks [alive], so nothing can run after the service was stopped.
  */
 class EyeTrackingService : LifecycleService() {
 
@@ -53,6 +58,10 @@ class EyeTrackingService : LifecycleService() {
     private val engine = GestureEngine()
 
     @Volatile private var landmarker: FaceLandmarker? = null
+    @Volatile private var alive = true
+    @Volatile private var minIntervalMs = FRAME_INTERVAL_MS
+    @Volatile private var idle = false
+    @Volatile private var lastResultAt = 0L
     private var provider: ProcessCameraProvider? = null
     private var analysis: ImageAnalysis? = null
     private var orientation: OrientationEventListener? = null
@@ -61,7 +70,6 @@ class EyeTrackingService : LifecycleService() {
     private var failed = false
     private var seenVersion = -1
     private var mapping: Map<Gesture, PhoneAction> = emptyMap()
-    private var minIntervalMs = 0L
 
     // Camera thread
     private var rawBitmap: Bitmap? = null
@@ -73,9 +81,34 @@ class EyeTrackingService : LifecycleService() {
     private var statWindowStart = 0L
     private var statFrames = 0
     private var lastLog = 0L
+    private var startedAt = 0L
     private var lastFaceSeen = 0L
+    private var lastPublish = 0L
+    private var lastPublishedFace: Boolean? = null
+
+    // Main thread
+    private var faceOk = false
+    private var stalled = false
+    private var cameraBoundAt = 0L
     private var lastNotificationText = ""
-    private var lastNotificationAt = 0L
+
+    private val watchdog = object : Runnable {
+        override fun run() {
+            if (!alive) return
+            val now = SystemClock.uptimeMillis()
+            val last = if (lastResultAt != 0L) lastResultAt else cameraBoundAt
+            val nowStalled = cameraBoundAt != 0L && now - last > STALL_MS
+            if (nowStalled != stalled) {
+                stalled = nowStalled
+                if (nowStalled) {
+                    Live.fps = 0f
+                    Live.note("No pictures from the camera. Is another app using it?")
+                }
+                refreshStatus()
+            }
+            main.postDelayed(this, 2000)
+        }
+    }
 
     override fun onCreate() {
         super.onCreate()
@@ -83,6 +116,7 @@ class EyeTrackingService : LifecycleService() {
         Live.resetSession()
         Live.running = true
         Live.status = "Starting..."
+        startedAt = SystemClock.uptimeMillis()
         if (!startAsForeground("Starting the camera...")) return
         try {
             createLandmarker()
@@ -104,16 +138,25 @@ class EyeTrackingService : LifecycleService() {
     }
 
     override fun onDestroy() {
+        alive = false
         Live.running = false
         Live.status = Live.error ?: "Stopped"
+        main.removeCallbacksAndMessages(null)
         orientation?.disable()
         try {
-            analysis?.clearAnalyzer()
-            provider?.unbindAll()
+            analysis?.let {
+                it.clearAnalyzer()
+                provider?.unbind(it)
+            }
         } catch (t: Throwable) {
             Log.w(TAG, "unbind", t)
         }
         worker.shutdown()
+        try {
+            worker.awaitTermination(300, TimeUnit.MILLISECONDS)
+        } catch (e: InterruptedException) {
+            Thread.currentThread().interrupt()
+        }
         try {
             landmarker?.close()
         } catch (t: Throwable) {
@@ -161,7 +204,10 @@ class EyeTrackingService : LifecycleService() {
             .setMinTrackingConfidence(0.5f)
             .setOutputFaceBlendshapes(true)
             .setResultListener { result, input -> onResult(result, input) }
-            .setErrorListener { e -> Log.e(TAG, "MediaPipe error", e) }
+            .setErrorListener { e ->
+                Log.e(TAG, "MediaPipe error", e)
+                Live.note("Face tracking error: ${e.message}")
+            }
             .build()
         landmarker = FaceLandmarker.createFromOptions(this, options)
     }
@@ -169,7 +215,7 @@ class EyeTrackingService : LifecycleService() {
     private fun startCamera() {
         val future = ProcessCameraProvider.getInstance(this)
         future.addListener({
-            if (failed) return@addListener
+            if (!alive || failed) return@addListener
             try {
                 val p = future.get()
                 provider = p
@@ -190,9 +236,10 @@ class EyeTrackingService : LifecycleService() {
                     .build()
                 ia.setAnalyzer(worker) { proxy -> analyze(proxy) }
                 analysis = ia
-                p.unbindAll()
                 p.bindToLifecycle(this, CameraSelector.DEFAULT_FRONT_CAMERA, ia)
                 watchOrientation(ia)
+                cameraBoundAt = SystemClock.uptimeMillis()
+                main.postDelayed(watchdog, 2000)
                 Live.status = "Looking for your face..."
                 Log.i(TAG, "camera bound")
             } catch (t: Throwable) {
@@ -223,7 +270,9 @@ class EyeTrackingService : LifecycleService() {
         try {
             val lm = landmarker ?: return
             val now = SystemClock.uptimeMillis()
-            if (now - lastSubmit < minIntervalMs || now <= lastTimestamp) return
+            // Nobody in front of the phone: look only a few times a second to save battery.
+            val interval = if (idle && !Live.uiVisible && !Live.calibrating) IDLE_INTERVAL_MS else minIntervalMs
+            if (now - lastSubmit < interval || now <= lastTimestamp) return
             lastSubmit = now
             lastTimestamp = now
 
@@ -259,6 +308,7 @@ class EyeTrackingService : LifecycleService() {
     // ---------------------------------------------------------------- result thread
 
     private fun onResult(result: FaceLandmarkerResult, input: MPImage) {
+        if (!alive) return
         try {
             val t = result.timestampMs()
             val points = result.faceLandmarks().firstOrNull()
@@ -283,6 +333,8 @@ class EyeTrackingService : LifecycleService() {
     }
 
     private fun handle(frame: Frame) {
+        val now = SystemClock.uptimeMillis()
+        lastResultAt = now
         if (Prefs.version != seenVersion) {
             seenVersion = Prefs.version
             applySettings()
@@ -292,19 +344,18 @@ class EyeTrackingService : LifecycleService() {
         val events = engine.onFrame(frame)
         Live.norm = engine.norm
         Live.framesTotal += 1
-        updateStatus(frame)
+        trackStats(frame, now)
         for (e in events) route(e)
     }
 
     private fun applySettings() {
         engine.configure(Prefs.engineConfig(), Prefs.calibration())
         mapping = Gesture.values().associateWith { Prefs.action(it) }
-        minIntervalMs = if (Prefs.batterySaver) 80L else 30L
-        main.post { EySnatchAccessibilityService.instance?.onTrackingChanged() }
+        minIntervalMs = if (Prefs.batterySaver) SAVER_INTERVAL_MS else FRAME_INTERVAL_MS
+        main.post { if (alive) EySnatchAccessibilityService.instance?.onTrackingChanged() }
     }
 
-    private fun updateStatus(frame: Frame) {
-        val now = SystemClock.uptimeMillis()
+    private fun trackStats(frame: Frame, now: Long) {
         if (statWindowStart == 0L) statWindowStart = now
         statFrames += 1
         if (now - statWindowStart >= 1000) {
@@ -313,21 +364,20 @@ class EyeTrackingService : LifecycleService() {
             statWindowStart = now
         }
         if (frame.face) lastFaceSeen = now
-        val faceOk = lastFaceSeen != 0L && now - lastFaceSeen < 2500
-        val text = when {
-            Live.paused -> "Paused"
-            faceOk -> "Watching your eyes"
-            else -> "No face in view - hold the phone so the front camera can see you"
-        }
-        Live.status = text
+        idle = now - maxOf(lastFaceSeen, startedAt) > IDLE_AFTER_MS
+        val ok = lastFaceSeen != 0L && now - lastFaceSeen < 2500
         if (now - lastLog > 5000) {
             lastLog = now
-            Log.i(TAG, "STATS frames=${Live.framesTotal} fps=${"%.1f".format(Live.fps)} face=$faceOk")
+            Log.i(TAG, "STATS frames=${Live.framesTotal} fps=${"%.1f".format(Live.fps)} face=$ok idle=$idle")
         }
-        if (text != lastNotificationText && now - lastNotificationAt > 2000) {
-            lastNotificationText = text
-            lastNotificationAt = now
-            notifications.notify(NOTIFICATION_ID, buildNotification(text))
+        if (ok != lastPublishedFace || now - lastPublish > 1000) {
+            lastPublishedFace = ok
+            lastPublish = now
+            main.post {
+                if (!alive) return@post
+                faceOk = ok
+                refreshStatus()
+            }
         }
     }
 
@@ -337,33 +387,50 @@ class EyeTrackingService : LifecycleService() {
         if (e.repeat && !action.repeatable) return
         if (Live.paused && action != PhoneAction.TOGGLE_PAUSE) return
 
+        // While an EySnatch screen is open (or calibrating) gestures are only shown: nothing is performed,
+        // and "pause" must not trigger either (the calibration's closed-eyes pose looks like it).
         val testOnly = Live.uiVisible || Live.calibrating
         if (!e.repeat) {
             Live.note("${e.gesture.label}  ->  ${action.label}" + if (testOnly) "  (test: not run)" else "")
-            Log.i(TAG, "GESTURE ${e.gesture} -> $action")
-        }
-        if (action == PhoneAction.TOGGLE_PAUSE) {
-            main.post { togglePause() }
-            return
+            Log.i(TAG, "GESTURE ${e.gesture} -> $action testOnly=$testOnly")
         }
         if (testOnly) return
-        val acc = EySnatchAccessibilityService.instance
-        if (acc == null) {
-            Live.note("Turn on the EySnatch accessibility service to run actions")
-            return
+
+        main.post {
+            if (!alive) return@post
+            if (action == PhoneAction.TOGGLE_PAUSE) {
+                togglePause()
+                return@post
+            }
+            if (Live.paused) return@post
+            val acc = EySnatchAccessibilityService.instance
+            if (acc == null) Live.note("Turn on the EySnatch accessibility service to run actions")
+            else acc.perform(action, e.gesture.label)
         }
-        acc.perform(action, e.gesture.label)
     }
+
+    // ---------------------------------------------------------------- main thread
 
     private fun togglePause() {
         Live.paused = !Live.paused
-        Live.status = if (Live.paused) "Paused" else "Watching your eyes"
-        lastNotificationText = Live.status
-        notifications.notify(NOTIFICATION_ID, buildNotification(Live.status))
+        refreshStatus()
         EySnatchAccessibilityService.instance?.hint(if (Live.paused) "EySnatch paused" else "EySnatch resumed")
     }
 
-    // ---------------------------------------------------------------- notification
+    private fun refreshStatus() {
+        if (!alive) return
+        val text = when {
+            Live.paused -> "Paused"
+            stalled -> "No pictures from the camera"
+            faceOk -> "Watching your eyes"
+            else -> "No face in view - hold the phone so the front camera can see you"
+        }
+        Live.status = text
+        if (text != lastNotificationText) {
+            lastNotificationText = text
+            notifications.notify(NOTIFICATION_ID, buildNotification(text))
+        }
+    }
 
     private fun buildNotification(text: String): Notification {
         val flags = PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
@@ -394,5 +461,10 @@ class EyeTrackingService : LifecycleService() {
         private const val CHANNEL = "eysnatch_running"
         private const val NOTIFICATION_ID = 1
         private const val MODEL_ASSET = "face_landmarker.task"
+        private const val FRAME_INTERVAL_MS = 30L
+        private const val SAVER_INTERVAL_MS = 80L
+        private const val IDLE_INTERVAL_MS = 200L
+        private const val IDLE_AFTER_MS = 10_000L
+        private const val STALL_MS = 4_000L
     }
 }

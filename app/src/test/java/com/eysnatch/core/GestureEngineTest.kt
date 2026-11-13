@@ -316,4 +316,64 @@ class GestureEngineTest {
         s.open(); s.run(1000)
         assertTrue(s.events.isEmpty())
     }
+
+    @Test
+    fun aFaceThatReturnsJustAfterTheResetWindowDoesNotInheritTheClosure() {
+        val s = Sim()
+        s.run(1000)
+        s.closeBoth(); s.run(400)
+        s.face = false; s.run(340)
+        s.face = true; s.open(); s.run(1000)
+        assertTrue("the unseen gap must not count as a long blink: ${s.events}", s.events.isEmpty())
+    }
+
+    @Test
+    fun aLongBlinkFollowedByOneEyeStayingClosedIsNotAlsoAWink() {
+        val s = Sim()
+        s.run(1000)
+        s.closeBoth(); s.run(1000)
+        s.blinkR = 0.05f; s.run(900)
+        s.open(); s.run(800)
+        assertEquals(listOf(Gesture.LONG_BLINK), s.first())
+    }
+
+    @Test
+    fun aBlinkDuringAHeldLookDoesNotFireItAgain() {
+        val s = Sim()
+        s.run(1000)
+        s.gx = -0.7f; s.run(700)
+        s.closeBoth(); s.gx = 0f; s.run(200)
+        s.open(); s.gx = -0.7f; s.run(1200)
+        assertEquals(listOf(Gesture.LOOK_LEFT), s.first())
+    }
+
+    @Test
+    fun aMomentaryDiagonalDoesNotRearmAHeldLook() {
+        val s = Sim()
+        s.run(1000)
+        s.gx = -0.9f; s.run(700)
+        s.gy = 0.6f; s.run(200)
+        s.gy = 0f; s.run(1000)
+        assertEquals(listOf(Gesture.LOOK_LEFT), s.first())
+    }
+
+    @Test
+    fun aGestureReadyDuringAnotherOnesCooldownStillFires() {
+        val s = Sim()
+        s.run(1000)
+        s.gx = 0.7f; s.brow = 0.5f; s.run(2000)
+        assertEquals(listOf(Gesture.LOOK_RIGHT, Gesture.RAISE_BROWS), s.first())
+    }
+
+    @Test
+    fun aChangedRestingHeadPoseIsEventuallyFollowedSoEyeGesturesWorkAgain() {
+        val s = Sim(GestureEngine(EngineConfig(enabled = setOf(Gesture.LOOK_LEFT)), Calibration(calibrated = true)))
+        s.run(1000)
+        s.yaw = 0.12f
+        s.gx = -0.7f; s.run(1000)
+        assertTrue("blocked while the head is far from the calibrated pose", s.events.isEmpty())
+        s.gx = 0f; s.run(100_000)
+        s.gx = -0.7f; s.run(900)
+        assertEquals(listOf(Gesture.LOOK_LEFT), s.first())
+    }
 }

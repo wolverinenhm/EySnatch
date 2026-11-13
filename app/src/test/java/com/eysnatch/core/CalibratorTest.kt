@@ -149,10 +149,57 @@ class CalibratorTest {
         c.pose(CalStep.TILT_DOWN, yaw = 0.01f, pitch = -0.62f)
         val r = c.build().calibration
         assertTrue(r.swapEyes)
-        assertEquals(0.3f, r.openL, 0.0001f)
+        assertEquals(0.9f, r.closedL, 0.0001f)
         assertEquals(0.2f, r.yaw.pos, 0.001f)
         assertEquals(-0.5f, r.pitch.base, 0.001f)
         assertEquals(-0.38f, r.pitch.pos, 0.001f)
+    }
+
+    @Test
+    fun eyeOnlyRunKeepsTheHeadRangesUsable() {
+        val c = Calibrator()
+        c.pose(CalStep.NEUTRAL, yaw = 0.1f, pitch = -0.55f)
+        c.pose(CalStep.BOTH_CLOSED, blinkL = 0.8f, blinkR = 0.8f)
+        val cal = c.build().calibration
+        assertEquals(-0.55f, cal.pitch.base, 0.0001f)
+        assertTrue("pitch ranges must stay on opposite sides of the resting pose", cal.pitch.posSpan > 0f && cal.pitch.negSpan > 0f)
+        assertTrue(cal.yaw.posSpan > 0f && cal.yaw.negSpan > 0f)
+
+        val n = Normalizer(cal)
+        assertEquals(1f, n.apply(Frame(0, true, pitch = -0.55f + cal.pitch.posSpan), false).hy, 0.01f)
+        assertEquals(-1f, n.apply(Frame(33, true, pitch = -0.55f - cal.pitch.negSpan), false).hy, 0.01f)
+    }
+
+    @Test
+    fun aSingleContradictoryWinkDoesNotFlipTheEyes() {
+        val c = Calibrator()
+        c.pose(CalStep.NEUTRAL)
+        c.pose(CalStep.WINK_LEFT, blinkL = 0.1f, blinkR = 0.9f) // user slipped and winked the wrong eye
+        val r = c.build()
+        assertFalse(r.calibration.swapEyes)
+        assertTrue(r.warnings.any { it.contains("Left wink") })
+    }
+
+    @Test
+    fun skippingTheClosedEyesPoseKeepsThePreviousClosedLevel() {
+        val prev = Calibration(calibrated = true, openL = 0.1f, closedL = 0.9f, openR = 0.1f, closedR = 0.88f)
+        val c = Calibrator(prev)
+        c.pose(CalStep.NEUTRAL, blinkL = 0.12f, blinkR = 0.12f)
+        c.pose(CalStep.WINK_LEFT, blinkL = 0.9f, blinkR = 0.1f)
+        c.pose(CalStep.WINK_RIGHT, blinkL = 0.1f, blinkR = 0.9f)
+        val r = c.build().calibration
+        assertEquals(0.9f, r.closedL, 0.0001f)
+        assertEquals(0.88f, r.closedR, 0.0001f)
+        assertEquals(0.12f, r.openL, 0.0001f)
+    }
+
+    @Test
+    fun aPoseWhereTheFaceIsMostlyMissingIsRejected() {
+        val c = Calibrator()
+        c.startStep()
+        repeat(10) { c.add(Frame(it * 33L, true)) }
+        repeat(40) { c.add(Frame((10 + it) * 33L, false)) }
+        assertFalse(c.finishStep(CalStep.NEUTRAL))
     }
 
     @Test

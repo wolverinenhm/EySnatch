@@ -33,6 +33,11 @@ jobs:
           cp app/build/outputs/apk/release/app-release.apk dist/EySnatch.apk
           cp app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk dist/EySnatch-androidTest.apk
           ls -l dist
+      - name: Check the release APK is signed with the fixed key (so updates install over old versions)
+        run: |
+          APKSIGNER=$(ls "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -1)
+          "$APKSIGNER" verify --print-certs dist/EySnatch.apk | tee signature.txt
+          grep -qi "7afefe58d21d935b977fdbd3fff624c1b438e406e0d834d264e4945d5613ede7" signature.txt
       - uses: actions/upload-artifact@v4
         with:
           name: dist
