@@ -156,7 +156,10 @@ class MainActivity : BaseActivity() {
         }
         hint.text = when {
             running && Live.paused -> "Paused. Do your 'pause / resume' gesture, or use the notification, to continue."
-            running -> "Gestures run in other apps. Leave this screen to use them."
+            running && EySnatchAccessibilityService.instance == null ->
+                "The accessibility service is off or not connected yet, so actions cannot run. See Setup below."
+            running -> "Gestures run in other apps. Leave this screen to use them." +
+                (Live.recent().firstOrNull()?.let { "\nLatest: $it" } ?: "")
             Prefs.calibration().calibrated -> ""
             else -> "Tip: run Calibrate once for the best accuracy."
         }
