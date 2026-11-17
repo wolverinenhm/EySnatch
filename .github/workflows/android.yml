@@ -1,4 +1,4 @@
-name: Android CI
+name: Build (Android + PC)
 
 on:
   push:
@@ -49,6 +49,81 @@ jobs:
           path: app/build/reports/tests/
           if-no-files-found: ignore
 
+  desktop-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: desktop/requirements*.txt
+      - name: Unit, model and tracker tests
+        working-directory: desktop
+        run: |
+          sudo apt-get update -q && sudo apt-get install -y -q libegl1 libgles2
+          pip install -r requirements-dev.txt
+          python -m pytest -q tests
+
+  desktop:
+    needs: desktop-test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            label: Windows
+          - os: ubuntu-latest
+            label: Linux
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: desktop/requirements*.txt
+      - name: Linux libraries
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -q && sudo apt-get install -y -q libegl1 libgles2 xvfb
+      - name: Package with PyInstaller
+        working-directory: desktop
+        shell: bash
+        run: |
+          pip install -r requirements-dev.txt
+          pyinstaller --noconfirm EySnatch.spec
+      - name: Self-test the packaged app (Windows)
+        if: runner.os == 'Windows'
+        working-directory: desktop
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath dist/EySnatch/EySnatch.exe -ArgumentList "--selftest", "$PWD/selftest.txt" -Wait -PassThru
+          Get-Content selftest.txt
+          if ($p.ExitCode -ne 0) { throw "self-test failed" }
+      - name: Self-test the packaged app (Linux)
+        if: runner.os == 'Linux'
+        working-directory: desktop
+        run: |
+          xvfb-run -a dist/EySnatch/EySnatch --selftest "$PWD/selftest.txt" || { cat selftest.txt; exit 1; }
+          cat selftest.txt
+      - name: Archive
+        working-directory: desktop/dist
+        shell: bash
+        run: |
+          mkdir -p ../../dist
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            7z a -tzip -mx=7 ../../dist/EySnatch-Windows.zip EySnatch >/dev/null
+          else
+            tar -czf ../../dist/EySnatch-Linux.tar.gz EySnatch
+          fi
+          ls -l ../../dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop-${{ matrix.label }}
+          path: dist/
+
   emulator:
     needs: build
     if: ${{ !startsWith(github.ref, 'refs/tags/') }}
@@ -83,22 +158,30 @@ jobs:
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: build
+    needs: [build, desktop]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: dist
-          path: dist
-      - name: Publish the APK
+          path: artifacts
+      - name: Publish the APK and the PC builds
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ github.ref_name }}
           REPO: ${{ github.repository }}
         run: |
-          cp dist/EySnatch.apk "EySnatch-${TAG}.apk"
-          gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1 || gh release create "$TAG" --repo "$REPO" --title "EySnatch $TAG" \
-            --notes "Download **EySnatch-${TAG}.apk** on your phone and open it to install. See the README for setup."
-          gh release upload "$TAG" "EySnatch-${TAG}.apk" --repo "$REPO" --clobber
+          mkdir -p out
+          cp artifacts/dist/EySnatch.apk "out/EySnatch-${TAG}.apk"
+          cp artifacts/desktop-Windows/EySnatch-Windows.zip "out/EySnatch-${TAG}-Windows.zip"
+          cp artifacts/desktop-Linux/EySnatch-Linux.tar.gz "out/EySnatch-${TAG}-Linux.tar.gz"
+          ls -l out
+          PRE=""
+          case "$TAG" in *-*) PRE="--prerelease" ;; esac
+          gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1 || gh release create "$TAG" --repo "$REPO" $PRE --title "EySnatch $TAG" \
+            --notes "**Phone:** download **EySnatch-${TAG}.apk** on your Android phone and open it to install.
+          **PC (Windows):** download **EySnatch-${TAG}-Windows.zip**, unzip it and run **EySnatch.exe** inside the EySnatch folder.
+          **Linux:** download the .tar.gz, extract it and run \`EySnatch/EySnatch\`.
+          See the README for setup."
+          gh release upload "$TAG" out/* --repo "$REPO" --clobber
