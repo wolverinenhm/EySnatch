@@ -1,6 +1,6 @@
 # EySnatch
 
-Control your Android phone **hands-free with your eyes**: swipe left/right, scroll, go back, go home, take a screenshot, open recent apps, move forward... without touching the screen.
+Control your Android phone, **or your Windows / Linux computer**, **hands-free with your eyes**: swipe left/right, scroll, go back, go home, take a screenshot, open recent apps, move forward... without touching the screen.
 
 The front camera is analysed **on the phone** (Google MediaPipe Face Landmarker). Nothing is recorded, stored or sent anywhere. An Android accessibility service then performs the actions.
 
@@ -18,7 +18,39 @@ The front camera is analysed **on the phone** (Google MediaPipe Face Landmarker)
 
 Updates install over the old version (every build is signed with the same key).
 
-## Gestures (all configurable)
+## PC version (Windows, Linux)
+
+The same eye tracking and gesture engine also runs on a computer with a webcam. Instead of Android's
+Back/Home/swipe it sends the usual keyboard shortcuts and mouse-wheel scrolls to the window in front.
+
+1. Open the latest release: **<https://github.com/wolverinenhm/EySnatch/releases/latest>** (or the newest pre-release).
+2. Download `EySnatch-v…-Windows.zip`, right-click it → **Extract all**, open the `EySnatch` folder and run **EySnatch.exe**.
+   Windows SmartScreen may say the app is unrecognised because it is a personal build: choose **More info → Run anyway**.
+   (Linux: download the `.tar.gz`, extract it and run `EySnatch/EySnatch`.)
+3. Click **Calibrate** once (about 45 s; a beep marks the start and end of every pose so you can look away from the screen).
+4. Click **Start eye control** and switch to the app you want to use. A small label confirms every action.
+   **Live view** shows the camera and every signal; while it (or Calibrate) is open gestures are only shown, not performed.
+
+| Movement | Default PC action |
+|---|---|
+| Look left / right (hold ~½ s, head still) | Left / Right arrow key (previous / next photo, slide, track...) |
+| Look up / down (hold = keeps scrolling) | Scroll up / down |
+| Double blink | Back (Alt+Left: browser, File Explorer) |
+| Long blink (~1 s) | Show desktop |
+| Eyes shut 2 s or more | Pause / resume EySnatch |
+| Wink left eye | Screenshot (saved to Pictures\Screenshots on Windows) |
+| Wink right eye | Switch to the previous app (Alt+Tab) |
+| Raise eyebrows | Page down |
+| Turn / tilt head | off (optional) |
+
+Other actions in **Gestures & settings**: forward, page up, all windows (Task view), mouse click, play/pause, volume
+up/down, mute, lock the computer, or *do nothing*. Settings and calibration are stored in `%APPDATA%\EySnatch`
+(Linux: `~/.config/eysnatch`). Nothing from the camera is saved or sent anywhere.
+
+Tips: sit about an arm's length from the webcam with light on your face. If you have several cameras, pick the
+right one with **Camera number** in the settings.
+
+## Phone gestures (all configurable)
 
 | Movement | Default action |
 |---|---|
@@ -70,6 +102,24 @@ Camera frames are processed in memory on the phone and discarded. The app has no
 
 ## Build it yourself
 
+### PC version
+
+Requirements: Python 3.10–3.12.
+
+```
+cd desktop
+pip install -r requirements-dev.txt
+python run_eysnatch.py             # run from source
+python -m pytest tests             # engine, model-on-photos and tracker tests (no webcam needed)
+pyinstaller --noconfirm EySnatch.spec   # dist/EySnatch/EySnatch(.exe)
+```
+
+`desktop/eysnatch_desktop/core.py` is a line-by-line port of the Kotlin engine in `app/src/main/java/com/eysnatch/core/`,
+and `desktop/tests/test_core.py` runs the same scenarios as the Android unit tests, so both versions behave the same.
+If you change one, change the other.
+
+### Android app
+
 Requirements: JDK 17 and the Android SDK (Android Studio Koala or newer works out of the box).
 
 ```
@@ -78,7 +128,7 @@ Requirements: JDK 17 and the Android SDK (Android Studio Koala or newer works ou
 ./gradlew connectedDebugAndroidTest  # on a device/emulator: real MediaPipe model on test photos, screens, accessibility actions
 ```
 
-`.github/workflows/android.yml` builds on every push, runs the unit tests, then boots an Android emulator, runs the instrumented tests, starts eye control against the emulator camera and stores logs and screenshots of every screen as a build artifact. Pushing a tag like `v1.1.0` publishes the APK as a GitHub release.
+`.github/workflows/android.yml` builds on every push: the APK, plus the PC version for Windows and Linux (each packaged app runs a self-test). It runs the unit tests of both, boots an Android emulator, runs the instrumented tests, starts eye control against the emulator camera and stores logs and screenshots of every screen as a build artifact. Pushing a tag like `v1.2.0` publishes the APK and the Windows/Linux builds as a GitHub release (a tag with a dash, like `v1.2.0-rc1`, makes a pre-release).
 
 MediaPipe ships no x86_64 library, so the **debug** build also contains the 32-bit x86 one (that is what the CI emulator runs); the **release** build is ARM only (arm64-v8a, armeabi-v7a).
 

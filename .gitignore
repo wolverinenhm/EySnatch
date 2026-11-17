@@ -6,3 +6,12 @@ build/
 captures/
 .externalNativeBuild/
 .cxx/
+
+# Desktop (Python) build output
+__pycache__/
+.pytest_cache/
+*.egg-info/
+desktop/dist/
+desktop/build/
+desktop/selftest.txt
+.venv/
